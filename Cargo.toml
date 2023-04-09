@@ -8,5 +8,4 @@ edition = "2021"
 [dependencies]
 byteorder = "1.4.3"
 mysql_common = "0.29.2"
-mysql_wasi = "23.0.1"
 wasmedge_wasi_socket = "0.4.3"

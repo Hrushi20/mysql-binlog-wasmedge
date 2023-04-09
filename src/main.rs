@@ -4,22 +4,19 @@
 #![allow(non_snake_case)]
 
 use std::borrow::Cow;
-use std::io::{Cursor, Read, Write};
+use std::io::{BufRead, BufReader, BufWriter, Cursor, Read, Write};
 use std::ptr::write;
 use std::rc::Rc;
 use std::string::FromUtf8Error;
 use byteorder::{BigEndian, LittleEndian, ReadBytesExt, WriteBytesExt};
-use mysql::*;
-use mysql::BinlogStream;
-use mysql::prelude::*;
 use mysql_common::binlog::BinlogStruct;
 use mysql_common::constants::{CapabilityFlags, StatusFlags};
 use mysql_common::frunk::labelled::chars::T;
-use mysql_common::packets::{ComBinlogDump, HandshakePacket};
 use wasmedge_wasi_socket::*;
-use mysql_common::scramble::scramble_sha256;
+use mysql_common::packets::{AuthPlugin, ComBinlogDump, HandshakePacket, HandshakeResponse};
+use mysql_common::scramble::{scramble_native, scramble_sha256};
 
-fn read_zero_terminated_string(cursor: &mut Cursor<Vec<u8>>) -> Vec<u8> {
+fn read_zero_terminated_string(cursor: &mut Cursor<&Vec<u8>>) -> Vec<u8> {
     let mut bytes = vec![];
 
     loop {
@@ -39,10 +36,7 @@ fn write_zero_terminated_string(string: String) -> Vec<u8>{
     bytes
 }
 
-fn receive_greeting(stream:&mut TcpStream) -> HandshakePacket{
-
-    let mut packet = vec![0; 95];
-    stream.read(&mut packet).unwrap();
+fn receive_greeting(packet:&Vec<u8>) -> HandshakePacket{
 
     let mut cursor = Cursor::new(packet);
 
@@ -63,6 +57,7 @@ fn receive_greeting(stream:&mut TcpStream) -> HandshakePacket{
         plugin_provided_data = read_zero_terminated_string(&mut cursor);
     };
 
+    // Check supoort for maira db
     HandshakePacket::new(
         protocol_version,
         Cow::from(server_version),
@@ -76,20 +71,105 @@ fn receive_greeting(stream:&mut TcpStream) -> HandshakePacket{
     )
 }
 
-fn authenticate(stream: &mut TcpStream){
+fn caching_sha2_password(handshake_packet:&HandshakePacket) -> Vec<u8>{
 
+    let mut capability_bits;
+    capability_bits = (CapabilityFlags::CLIENT_LONG_FLAG |
+        CapabilityFlags::CLIENT_PROTOCOL_41 |
+        CapabilityFlags::CLIENT_SECURE_CONNECTION |
+        CapabilityFlags::CLIENT_PLUGIN_AUTH |
+        CapabilityFlags::CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA);
+
+    let mut body = vec![];
+
+    body.write_u32::<LittleEndian>(capability_bits.bits()).unwrap();
+    body.write_u32::<LittleEndian>(0).unwrap();
+    body.write_u8(handshake_packet.default_collation()).unwrap();
+    body.write_all(&[0 as u8;23]).unwrap(); // reserved
+    body.write_all(&*write_zero_terminated_string(String::from("root"))).unwrap();
+
+    let password_bytes = "Hrushi20".as_bytes();
+    let password = scramble_sha256(&*handshake_packet.nonce(), password_bytes).unwrap();
+    body.write_u8(password.len() as u8).unwrap();
+    body.write_all(&password).unwrap();
+    body.write_all(handshake_packet.auth_plugin_name_ref().unwrap()).unwrap();
+
+
+    let mut buffer = vec![];
+    buffer.write_u24::<LittleEndian>(body.len() as u32).unwrap();
+    buffer.write_u8(1).unwrap();
+    buffer.write_all(&* body).unwrap();
+
+    buffer
 }
 
-fn main() -> std::io::Result<()> {
-    let mut stream =TcpStream::connect("127.0.0.1:3306")?;
+fn mysql_native_password(handshake_packet:&HandshakePacket) -> Vec<u8>{
+
+    let mut capability_bits;
+    capability_bits = (CapabilityFlags::CLIENT_LONG_FLAG |
+        CapabilityFlags::CLIENT_PROTOCOL_41 |
+        CapabilityFlags::CLIENT_SECURE_CONNECTION |
+        CapabilityFlags::CLIENT_PLUGIN_AUTH);
+
+
+    let mut body = vec![];
+    body.write_u32::<LittleEndian>(capability_bits.bits()).unwrap();
+    body.write_u32::<LittleEndian>(0).unwrap();
+    body.write_u8(handshake_packet.default_collation()).unwrap();
+    body.write_all(&[0 as u8;23]).unwrap(); // reserved
+    body.write_all(&*write_zero_terminated_string(String::from("root"))).unwrap();
+    // get sha1 password;
+    let password_bytes = "Hrushi20".as_bytes();
+    let password = scramble_native(&*handshake_packet.nonce(), password_bytes).unwrap();
+    body.write_u8(password.len() as u8).unwrap();
+    body.write_all(&password).unwrap();
+    body.write_all(handshake_packet.auth_plugin_name_ref().unwrap());
+
+
+    let mut buffer = vec![];
+    buffer.write_u24::<LittleEndian>(body.len() as u32).unwrap();
+    buffer.write_u8(1).unwrap();
+    buffer.write_all(&* body).unwrap();
+
+    buffer
+}
+
+fn authenticate(handshake_packet: &HandshakePacket) -> Vec<u8> {
+
+    match handshake_packet.auth_plugin() {
+        Some(AuthPlugin::CachingSha2Password) => caching_sha2_password(&handshake_packet),
+        Some(AuthPlugin::MysqlNativePassword) => mysql_native_password(&handshake_packet),
+        _ => vec![],
+    }
+}
+
+fn main() -> Result<(),()> {
+    let mut stream = TcpStream::connect("127.0.0.1:3306").unwrap();
 
     println!("Listening to port 3306");
 
     // ==========================================================================================================
+    let mut writer = BufWriter::new(& stream);
+    let mut reader = BufReader::new(&stream);
 
-    let handshake_packet = receive_greeting(&mut stream);
+    let mut packet = reader.fill_buf().unwrap().to_vec();
 
-    // ==========================================================================================================
+    let mut cursor = Cursor::new(packet.clone());
+
+    let handshake_packet = receive_greeting(&packet);
+
+    println!("{:?}",handshake_packet);
+
+     // ==========================================================================================================
+    let mut auth_bytes = authenticate(&handshake_packet);
+
+    writer.write_all(&auth_bytes).unwrap();
+
+    let auth_response = reader.fill_buf().unwrap().to_vec();
+
+    check_auth_response();
+    println!("{:x?}",auth_response);
+
 
     Ok(())
 }
