@@ -60,7 +60,7 @@ fn receive_greeting(packet:&Vec<u8>) -> HandshakePacket{
         plugin_provided_data = read_zero_terminated_string(&mut cursor);
     };
 
-    // Check supoort for maira db
+    // Check support for maira db
     HandshakePacket::new(
         protocol_version,
         Cow::from(server_version),
@@ -141,21 +141,26 @@ fn main() -> Result<(),()> {
     println!("Listening to port 3306");
 
     // ==========================================================================================================
-    let mut channel = packetChannel::PacketChannel::new(&stream);
+    let mut channel = packetChannel::PacketChannel::new(&mut stream);
 
     let greeting_body = channel.read();
     let handshake_packet = receive_greeting(&greeting_body);
-    println!("{:?}",handshake_packet);
 
      // ==========================================================================================================
     let mut auth_bytes = authenticate(&handshake_packet);
-    println!("{:?}",auth_bytes);
-
     channel.write(auth_bytes);
-  //
-  //   let auth_response = channel.read();
-  //   //
-  // println!("{:x?}",auth_response);
+
+    let auth_response = channel.read();
+
+    match auth_response[0] {
+        0x00 => true, // Success in authentication,
+        0xFF => unimplemented!("Authentication Error"),
+        0xFE => unimplemented!("Need to switch Authentication"),
+        _ => unimplemented!("Need to process caching sha2 result or switch authentication")
+    };
+
+    channel.authentication_complete();
+    println!("Authenticated my sql db successfully.");
 
 
     Ok(())

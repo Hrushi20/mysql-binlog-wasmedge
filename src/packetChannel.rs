@@ -3,8 +3,7 @@ use byteorder::{LittleEndian, WriteBytesExt};
 use wasmedge_wasi_socket::*;
 
 pub struct PacketChannel<'a>{
-    reader: BufReader<&'a TcpStream>,
-    writer: BufWriter<&'a TcpStream>,
+    stream: &'a TcpStream,
     packet_number: u8,
     authentication_complete: bool,
     is_ssl: bool
@@ -12,10 +11,9 @@ pub struct PacketChannel<'a>{
 
 impl<'a> PacketChannel<'a> {
 
-    pub fn new(stream:  &'a TcpStream) -> Self {
+    pub fn new(stream: &'a mut TcpStream) -> Self {
         PacketChannel{
-            reader: BufReader::new(stream),
-            writer: BufWriter::new(stream),
+            stream,
             packet_number: 0,
             authentication_complete: false,
             is_ssl: false
@@ -23,10 +21,8 @@ impl<'a> PacketChannel<'a> {
     }
 
     pub fn read(&mut self) -> Vec<u8> {
-        let mut packet = self.reader.fill_buf().unwrap().to_vec();
-        if self.packet_number != packet[3] {
-           unimplemented!("Invalid sequence of packet");
-        }
+        let mut reader = BufReader::new(self.stream);
+        let mut packet = reader.fill_buf().unwrap().to_vec();
         self.packet_number +=1;
         packet[4..].to_vec()
     }
@@ -43,7 +39,9 @@ impl<'a> PacketChannel<'a> {
         packet.write_u8(self.packet_number).unwrap();
         self.packet_number += 1;
         packet.write_all(&*body);
-        self.writer.write_all(&*packet).unwrap();
+
+        let mut writer = BufWriter::new(self.stream);
+        writer.write_all(&*packet).unwrap();
     }
 
     pub fn authentication_complete(&mut self) {
