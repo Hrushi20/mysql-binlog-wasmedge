@@ -8,6 +8,7 @@ use std::io::{BufRead, BufReader, BufWriter, Cursor, Read, Write};
 use std::ptr::write;
 use std::rc::Rc;
 use std::string::FromUtf8Error;
+use std::sync::Mutex;
 use byteorder::{BigEndian, LittleEndian, ReadBytesExt, WriteBytesExt};
 use mysql_common::binlog::BinlogStruct;
 use mysql_common::constants::{CapabilityFlags, StatusFlags};
@@ -15,6 +16,8 @@ use mysql_common::frunk::labelled::chars::T;
 use wasmedge_wasi_socket::*;
 use mysql_common::packets::{AuthPlugin, ComBinlogDump, HandshakePacket, HandshakeResponse};
 use mysql_common::scramble::{scramble_native, scramble_sha256};
+
+mod packetChannel;
 
 fn read_zero_terminated_string(cursor: &mut Cursor<&Vec<u8>>) -> Vec<u8> {
     let mut bytes = vec![];
@@ -94,13 +97,8 @@ fn caching_sha2_password(handshake_packet:&HandshakePacket) -> Vec<u8>{
     body.write_all(&password).unwrap();
     body.write_all(handshake_packet.auth_plugin_name_ref().unwrap()).unwrap();
 
+    body
 
-    let mut buffer = vec![];
-    buffer.write_u24::<LittleEndian>(body.len() as u32).unwrap();
-    buffer.write_u8(1).unwrap();
-    buffer.write_all(&* body).unwrap();
-
-    buffer
 }
 
 fn mysql_native_password(handshake_packet:&HandshakePacket) -> Vec<u8>{
@@ -125,13 +123,7 @@ fn mysql_native_password(handshake_packet:&HandshakePacket) -> Vec<u8>{
     body.write_all(&password).unwrap();
     body.write_all(handshake_packet.auth_plugin_name_ref().unwrap());
 
-
-    let mut buffer = vec![];
-    buffer.write_u24::<LittleEndian>(body.len() as u32).unwrap();
-    buffer.write_u8(1).unwrap();
-    buffer.write_all(&* body).unwrap();
-
-    buffer
+    body
 }
 
 fn authenticate(handshake_packet: &HandshakePacket) -> Vec<u8> {
@@ -149,26 +141,21 @@ fn main() -> Result<(),()> {
     println!("Listening to port 3306");
 
     // ==========================================================================================================
-    let mut writer = BufWriter::new(& stream);
-    let mut reader = BufReader::new(&stream);
+    let mut channel = packetChannel::PacketChannel::new(&stream);
 
-    let mut packet = reader.fill_buf().unwrap().to_vec();
-
-    let mut cursor = Cursor::new(packet.clone());
-
-    let handshake_packet = receive_greeting(&packet);
-
+    let greeting_body = channel.read();
+    let handshake_packet = receive_greeting(&greeting_body);
     println!("{:?}",handshake_packet);
 
      // ==========================================================================================================
     let mut auth_bytes = authenticate(&handshake_packet);
+    println!("{:?}",auth_bytes);
 
-    writer.write_all(&auth_bytes).unwrap();
-
-    let auth_response = reader.fill_buf().unwrap().to_vec();
-
-    check_auth_response();
-    println!("{:x?}",auth_response);
+    channel.write(auth_bytes);
+  //
+  //   let auth_response = channel.read();
+  //   //
+  // println!("{:x?}",auth_response);
 
 
     Ok(())
