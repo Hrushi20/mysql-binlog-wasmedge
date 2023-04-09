@@ -1,0 +1,12 @@
+[package]
+name = "sql"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+byteorder = "1.4.3"
+mysql_common = "0.29.2"
+mysql_wasi = "23.0.1"
+wasmedge_wasi_socket = "0.4.3"
